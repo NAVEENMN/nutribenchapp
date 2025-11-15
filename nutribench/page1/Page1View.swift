@@ -6,56 +6,51 @@ struct Page1View: View {
     @State private var uploadError: String?
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: 16) {
-                header()
-                gridCards()
-
-                // Upload button
-                Button {
-                    showConsent = true
-                } label: {
-                    Label("Upload to UCSB", systemImage: "square.and.arrow.up")
-                        .frame(maxWidth: .infinity)
+        VStack(alignment: .leading, spacing: 0) {
+            // ---- Fixed brand header (matches Page 2) ----
+            VStack(alignment: .leading, spacing: 0) {
+                AppHeader()
+                    .padding([.top, .horizontal])
+                // Optional inline loading/error just under the title, like Page 2 style
+                if vm.isLoading {
+                    ProgressView().padding(.horizontal).padding(.top, 6)
+                } else if let err = vm.errorMessage {
+                    Text(err)
+                        .foregroundColor(.red)
+                        .font(.footnote)
+                        .padding(.horizontal)
+                        .padding(.top, 6)
                 }
-
-                if let status = vm.uploadStatus {
-                    Text(status).font(.footnote).foregroundColor(.secondary)
-                }
-                if let err = uploadError {
-                    Text(err).font(.footnote).foregroundColor(.red)
-                }
+                Divider()
             }
-            .padding()
+
+            // ---- Scrollable content below header ----
+            ScrollView {
+                VStack(spacing: 16) {
+                    gridCards()
+
+                    if let status = vm.uploadStatus {
+                        Text(status)
+                            .font(.footnote)
+                            .foregroundColor(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    if let err = uploadError {
+                        Text(err)
+                            .font(.footnote)
+                            .foregroundColor(.red)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .padding()
+            }
         }
         .onAppear {
             if !vm.isLoading && vm.errorMessage == nil { vm.initialize() }
         }
-        .sheet(isPresented: $showConsent) {
-            ConsentSheet(isPresented: $showConsent) {
-                vm.uploadLastYearHealth { result in
-                    switch result {
-                    case .success: uploadError = nil
-                    case .failure(let e): uploadError = e.localizedDescription
-                    }
-                }
-            }
-        }
     }
 
     // MARK: - Subviews
-
-    private func header() -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            AppHeader()
-            if vm.isLoading {
-                ProgressView().padding(.top, 4)
-            } else if let err = vm.errorMessage {
-                Text(err).foregroundColor(.red).font(.footnote)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
 
     private func gridCards() -> some View {
         // Two-column adaptive grid

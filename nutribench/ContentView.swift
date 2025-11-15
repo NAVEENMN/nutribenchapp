@@ -18,6 +18,15 @@ struct ContentView: View {
     
     var body: some View {
         TabView(selection: $selection) {
+            
+            // --- Upload / Health page ---
+            Page1View()
+                .tabItem {
+                    Image(systemName: "doc.text.magnifyingglass")
+                        .renderingMode(.template)
+                    Text("Indicators")
+                }
+                .tag(Tab.upload)
 
             // --- Food logging page ---
             Page2View()
@@ -28,21 +37,12 @@ struct ContentView: View {
                 }
                 .tag(Tab.logFood)
             
-            // --- Upload / Health page ---
-            Page1View()
-                .tabItem {
-                    Image(systemName: "square.and.arrow.up.on.square.fill")
-                        .renderingMode(.template)
-                    Text("Upload")
-                }
-                .tag(Tab.upload)
-            
             // --- Glucose trends page ---
             Page3View()
                 .tabItem {
                     Image(systemName: "chart.xyaxis.line")
                         .renderingMode(.template)
-                    Text("Trends")
+                    Text("Glucose Trends")
                 }
                 .tag(Tab.trends)
         }

@@ -59,18 +59,15 @@ private func parseNutritionJSON(from response: String) -> ParsedNutrition? {
     return ParsedNutrition(foods: foods, carbsG: carbsG, steps: steps)
 }
 
-// Normalize "1 bagel" -> "bagel", "2 slices bread" -> "slices bread" (lightweight)
+/// Keep quantities like "3 tangerines" intact,
+/// only normalize trivial "1 " prefix (for cleaner display).
 private func normalizeFoodName(_ s: String) -> String {
-    let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
-    if let firstSpace = t.firstIndex(of: " "),
-       Int(t[..<firstSpace]) != nil {
-        let rest = t[firstSpace...].trimmingCharacters(in: .whitespaces)
-        return rest.isEmpty ? t : rest
+    let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+    // Only drop leading "1 " (e.g. "1 bagel" -> "bagel")
+    if trimmed.hasPrefix("1 ") {
+        return String(trimmed.dropFirst(2)).trimmingCharacters(in: .whitespaces)
     }
-    if t.hasPrefix("1 ") {
-        return String(t.dropFirst(2)).trimmingCharacters(in: .whitespaces)
-    }
-    return t
+    return trimmed
 }
 
 private func numberFromAny(_ any: Any?) -> Double? {
@@ -96,6 +93,7 @@ final class Page2ViewModel: ObservableObject {
     @Published var logs: [FoodLog] = []
     @Published var isSending = false
     @Published var sendError: String?
+    @Published var isLoading = false
 
     // Edit flow
     @Published var editing: FoodLog? = nil
@@ -106,13 +104,20 @@ final class Page2ViewModel: ObservableObject {
     // Load historical food logs from DB Lambda
     func loadHistory() {
         let uid = UserID.getOrCreate()
+        isLoading = true
         Task {
             do {
                 let events = try await DBClient.shared.getEvents(userId: uid, limit: 200)
                 let mapped = events.compactMap { $0.toFoodLog() }
-                self.logs = mapped.sorted { $0.date > $1.date }
+                await MainActor.run {
+                    self.logs = mapped.sorted { $0.date > $1.date }
+                    self.isLoading = false
+                }
             } catch {
-                self.sendError = "History fetch failed."
+                await MainActor.run {
+                    self.sendError = "History fetch failed."
+                    self.isLoading = false
+                }
             }
         }
     }
@@ -149,8 +154,10 @@ final class Page2ViewModel: ObservableObject {
 
         if let response, let parsed = parseNutritionJSON(from: response) {
             if !parsed.foods.isEmpty {
-                let normalized = parsed.foods.map(normalizeFoodName)
-                displayFood = normalized.joined(separator: ", ")
+                // Keep quantities (e.g., "3 tangerines")
+                displayFood = parsed.foods
+                    .map(normalizeFoodName)
+                    .joined(separator: ", ")
             }
             if let g = parsed.carbsG {
                 carbsDisplay = String(format: "%.0fg", g)  // "48g"

@@ -15,6 +15,10 @@ final class Page3ViewModel: ObservableObject {
     @Published var rangeStart: Date = Date().addingTimeInterval(-24*3600)
     @Published var rangeEnd: Date = Date()
 
+    // NEW: daily extremes for the selected day (or today)
+    @Published var dailyMax: Double? = nil
+    @Published var dailyMin: Double? = nil
+
     private let hk = HealthKitManager()
 
     func loadInitial() {
@@ -23,6 +27,8 @@ final class Page3ViewModel: ObservableObject {
         rangeStart = rangeEnd.addingTimeInterval(-24*3600)
         loadGlucose()
         loadMeals()
+        // compute daily extremes for "today"
+        updateDailyExtremes(for: Date())
     }
 
     func loadGlucose() {
@@ -41,9 +47,7 @@ final class Page3ViewModel: ObservableObject {
             let uid = UserID.getOrCreate()
             do {
                 let events = try await DBClient.shared.getEvents(userId: uid, limit: limit)
-                // Only food logs; map to FoodLog via toFoodLog()
                 let mapped = events.compactMap { $0.toFoodLog() }
-                // Show recent first for the list
                 meals = mapped.sorted { $0.date > $1.date }
             } catch {
                 meals = []
@@ -58,6 +62,9 @@ final class Page3ViewModel: ObservableObject {
         rangeStart = center.addingTimeInterval(-90*60)  // -1.5h
         rangeEnd   = center.addingTimeInterval( 90*60)  // +1.5h
         loadGlucose()
+
+        // NEW: compute extremes for that calendar day
+        updateDailyExtremes(for: meal.date)
     }
 
     /// Go back to the last 24h window
@@ -66,6 +73,27 @@ final class Page3ViewModel: ObservableObject {
         rangeEnd = Date()
         rangeStart = rangeEnd.addingTimeInterval(-24*3600)
         loadGlucose()
+
+        // NEW: compute extremes for "today"
+        updateDailyExtremes(for: Date())
+    }
+
+    // MARK: NEW - Daily extremes for a calendar day
+    private func updateDailyExtremes(for day: Date) {
+        let start = Calendar.current.startOfDay(for: day)
+        guard let end = Calendar.current.date(byAdding: .day, value: 1, to: start) else {
+            self.dailyMax = nil; self.dailyMin = nil; return
+        }
+        hk.fetchGlucoseSeries(start: start, end: end) { [weak self] result in
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let pts):
+                    self?.dailyMax = pts.map(\.mgdl).max()
+                    self?.dailyMin = pts.map(\.mgdl).min()
+                case .failure:
+                    self?.dailyMax = nil; self?.dailyMin = nil
+                }
+            }
+        }
     }
 }
-

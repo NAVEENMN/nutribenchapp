@@ -71,9 +71,6 @@ struct LogFoodSheet: View {
                     .disabled(foodText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSending)
                 }
 
-                Section(footer: Text("Carbs will be saved as parsed from the server response (fallback 15 g).")) {
-                    EmptyView()
-                }
             }
             .navigationBarTitle(skipServerCall ? "Edit Food" : "Log Food", displayMode: .inline)
             .navigationBarItems(
