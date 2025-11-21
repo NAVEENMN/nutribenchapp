@@ -127,10 +127,19 @@ struct ServerEvent: Decodable {
         let steps = (details?["calculation_steps"]?.value as? String)
                  ?? (details?["serverResponse"]?.value as? String)
         let original = (details?["originalQuery"]?.value as? String) ?? food
-        let date = DateParsers.parseServerTimestamp(timestampISO ?? timestamp) ?? Date.distantPast
 
-        return FoodLog(eventId: event_id, date: date, food: food, carbsText: carbsText,
-                       serverResponse: steps, originalQuery: original)
+        // NEW: use details["timestampISO"] (edited meal time) if present
+        let detailTS = details?["timestampISO"]?.value as? String
+        let date = DateParsers.parseServerTimestamp(detailTS ?? timestampISO ?? timestamp) ?? Date.distantPast
+
+        return FoodLog(
+            eventId: event_id,
+            date: date,
+            food: food,
+            carbsText: carbsText,
+            serverResponse: steps,
+            originalQuery: original
+        )
     }
 
 }

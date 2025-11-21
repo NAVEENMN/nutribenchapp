@@ -5,7 +5,6 @@ import Foundation
 /// If the server body is a JSON-encoded *string* (e.g. "\"{\\\"food_items\\\":...}\""),
 /// decode it once to get the inner JSON text.
 private func unwrapJSONStringOnce(_ s: String) -> String {
-    // Wrap in an array and parse, so JSON decoder will unescape once
     if let data = "[\(s)]".data(using: .utf8),
        let arr = try? JSONSerialization.jsonObject(with: data) as? [Any],
        let first = arr.first as? String {
@@ -38,6 +37,7 @@ private func parseNutritionJSON(from response: String) -> ParsedNutrition? {
 
     guard let data = candidate.data(using: .utf8),
           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        print("❌ parseNutritionJSON – failed to decode JSON")
         return nil
     }
 
@@ -56,18 +56,12 @@ private func parseNutritionJSON(from response: String) -> ParsedNutrition? {
     let steps = (obj["calculation_steps"] as? String)?
         .trimmingCharacters(in: .whitespacesAndNewlines)
 
+    print("🧩 parseNutritionJSON – foods=\(foods), carbsG=\(String(describing: carbsG)), steps.isNil=\(steps == nil)")
     return ParsedNutrition(foods: foods, carbsG: carbsG, steps: steps)
 }
 
-/// Keep quantities like "3 tangerines" intact,
-/// only normalize trivial "1 " prefix (for cleaner display).
 private func normalizeFoodName(_ s: String) -> String {
-    let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
-    // Only drop leading "1 " (e.g. "1 bagel" -> "bagel")
-    if trimmed.hasPrefix("1 ") {
-        return String(trimmed.dropFirst(2)).trimmingCharacters(in: .whitespaces)
-    }
-    return trimmed
+    return s.trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
 private func numberFromAny(_ any: Any?) -> Double? {
@@ -76,7 +70,6 @@ private func numberFromAny(_ any: Any?) -> Double? {
     case let i as Int:    return Double(i)
     case let s as String:
         if let d = Double(s) { return d }
-        // Regex: first integer/decimal in the string
         if let match = try? NSRegularExpression(pattern: #"(\d+(\.\d+)?)"#)
             .firstMatch(in: s, range: NSRange(s.startIndex..<s.endIndex, in: s)),
            let r = Range(match.range(at: 1), in: s) {
@@ -90,42 +83,97 @@ private func numberFromAny(_ any: Any?) -> Double? {
 
 @MainActor
 final class Page2ViewModel: ObservableObject {
-    @Published var logs: [FoodLog] = []
-    @Published var isSending = false
-    @Published var sendError: String?
-    @Published var isLoading = false
-
-    // Edit flow
-    @Published var editing: FoodLog? = nil
+    @Published var logs: [FoodLog] = [] {
+        didSet {
+            print("📚 logs didSet – new count=\(logs.count)")
+        }
+    }
+    @Published var isSending = false {
+        didSet { print("📨 isSending=\(isSending)") }
+    }
+    @Published var sendError: String? {
+        didSet { if let e = sendError { print("❗ sendError set: \(e)") } }
+    }
+    @Published var isLoading = false {
+        didSet { print("⏳ isLoading=\(isLoading)") }
+    }
 
     // Your nutrition inference Lambda (returns {statusCode, body})
     private let endpoint = URL(string: "https://5lcj2njvoq4urxszpj7lqoatxy0gslkf.lambda-url.us-west-2.on.aws/")!
+    
+    // Track whether we've already loaded history from server this app session
+    private var hasLoadedInitialHistory = false
 
-    // Load historical food logs from DB Lambda
+    init() {
+        print("🔥 Page2ViewModel.init – new instance created")
+    }
+    
+    private let isoFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    // MARK: - History / initial load
+
+    func ensureInitialHistoryLoaded() {
+        print("📥 ensureInitialHistoryLoaded – hasLoadedInitialHistory=\(hasLoadedInitialHistory), logs.count=\(logs.count)")
+
+        // 1) Always try local cache first (fast, robust)
+        if !hasLoadedInitialHistory && logs.isEmpty {
+            let cached = FoodLogStore.shared.load()
+            print("📄 loaded cached logs from disk: \(cached.count)")
+            if !cached.isEmpty {
+                self.logs = cached.sorted { $0.date > $1.date }
+                print("📄 after assigning cached logs, logs.count=\(self.logs.count)")
+            }
+        }
+
+        // 2) Then, once per app session, refresh from server
+        guard !hasLoadedInitialHistory else {
+            print("📥 ensureInitialHistoryLoaded – already loaded, returning")
+            return
+        }
+        hasLoadedInitialHistory = true
+        print("🌐 ensureInitialHistoryLoaded – calling loadHistory()")
+        loadHistory()
+    }
+
     func loadHistory() {
         let uid = UserID.getOrCreate()
+        print("🌐 loadHistory – start for user_id=\(uid)")
         isLoading = true
         Task {
             do {
                 let events = try await DBClient.shared.getEvents(userId: uid, limit: 200)
                 let mapped = events.compactMap { $0.toFoodLog() }
                 await MainActor.run {
+                    print("🌐 loadHistory – server events=\(events.count), mapped foodLogs=\(mapped.count)")
                     self.logs = mapped.sorted { $0.date > $1.date }
                     self.isLoading = false
+                    FoodLogStore.shared.save(self.logs)
+                    print("🌐 loadHistory – done, logs.count=\(self.logs.count)")
                 }
             } catch {
                 await MainActor.run {
+                    print("❌ loadHistory failed: \(error)")
                     self.sendError = "History fetch failed."
                     self.isLoading = false
+                    // keep local cache as-is
                 }
             }
         }
     }
 
-    // Submit a new query to the nutrition Lambda, then save locally & to DB
+    // MARK: - Submit new meal
+
     func submit(food: String) {
         let trimmed = food.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        print("🍽 submit(food:) called with '\(food)' trimmed='\(trimmed)'")
+        guard !trimmed.isEmpty else {
+            print("❌ submit – trimmed text is empty, ignoring")
+            return
+        }
 
         isSending = true
         sendError = nil
@@ -136,8 +184,10 @@ final class Page2ViewModel: ObservableObject {
                 self.isSending = false
                 switch result {
                 case .success(let responseText):
+                    print("🍽 submit – postFood success, adding local log")
                     _ = self.addLocal(food: trimmed, response: responseText)
                 case .failure(let err):
+                    print("❌ submit – postFood failed: \(err)")
                     self.sendError = err.localizedDescription
                     _ = self.addLocal(food: trimmed, response: nil)
                 }
@@ -145,26 +195,28 @@ final class Page2ViewModel: ObservableObject {
         }
     }
 
-    // Add a new log (parsing server JSON for foods + carbs + steps) and persist to DB
+    // MARK: - Local add + persist + server add_event
+
     @discardableResult
     func addLocal(food: String, response: String?) -> FoodLog {
+        print("➕ addLocal – food='\(food)', hasResponse=\(response != nil)")
         var displayFood = food
-        var carbsDisplay = "15g"   // normalized "48g"
+        var carbsDisplay = "15g"
         var stepsText: String? = nil
 
         if let response, let parsed = parseNutritionJSON(from: response) {
+            print("➕ addLocal – using parsed nutrition")
             if !parsed.foods.isEmpty {
-                // Keep quantities (e.g., "3 tangerines")
                 displayFood = parsed.foods
                     .map(normalizeFoodName)
                     .joined(separator: ", ")
             }
             if let g = parsed.carbsG {
-                carbsDisplay = String(format: "%.0fg", g)  // "48g"
+                carbsDisplay = String(format: "%.0fg", g)
             }
             stepsText = parsed.steps
         } else if let t = extractCarbText(from: response) {
-            // fallback for legacy/plain text responses, normalize to "48g"
+            print("➕ addLocal – using legacy carb extractor")
             let cleaned = t
                 .replacingOccurrences(of: "carbs", with: "", options: .caseInsensitive)
                 .replacingOccurrences(of: " ", with: "")
@@ -176,41 +228,45 @@ final class Page2ViewModel: ObservableObject {
             date: Date(),
             food: displayFood,
             carbsText: carbsDisplay,
-            serverResponse: stepsText,    // expanded shows steps
-            originalQuery: food           // expanded shows user's text
+            serverResponse: stepsText,
+            originalQuery: food
         )
 
+        print("➕ addLocal – appending newLog id=\(newLog.id) food='\(newLog.food)' carbs='\(newLog.carbsText)'")
         logs.append(newLog)
         logs.sort { $0.date > $1.date }
+        FoodLogStore.shared.save(logs)
+        print("➕ addLocal – after append, logs.count=\(logs.count)")
 
-        // Persist to DB Lambda with rich details (including the original query)
+        // Persist to DB
         let uid = UserID.getOrCreate()
         Task {
+            let iso = isoFormatter.string(from: newLog.date)
             let details: [String: AnyEncodable] = [
                 "food": AnyEncodable(displayFood),
                 "carbsText": AnyEncodable(carbsDisplay),
                 "total_carbs_g": AnyEncodable(Int(carbsDisplay.replacingOccurrences(of: "g", with: "")) ?? 0),
-                // store steps redundantly so reads are robust
                 "serverResponse": AnyEncodable(stepsText ?? ""),
                 "calculation_steps": AnyEncodable(stepsText ?? ""),
-                "originalQuery": AnyEncodable(food)
+                "originalQuery": AnyEncodable(food),
+                "timestampISO": AnyEncodable(iso)
             ]
 
-            // Reuse postRaw so we can decode event_id immediately
             struct AddEventResponse: Decodable {
                 let ok: Bool
                 let result: Inner
                 struct Inner: Decodable { let event_id: String? }
             }
             let payload = DBClient.AddEventPayload(user_id: uid, event_type: "food_log", details: details)
+            print("➕ addLocal – sending add_event to server for id=\(newLog.id)")
             if let data = try? await DBClient.shared.postRaw("add_event", payload: payload),
                let res = try? JSONDecoder().decode(AddEventResponse.self, from: data),
                let eid = res.result.event_id,
                let idx = self.logs.firstIndex(where: { $0.id == newLog.id }) {
 
-                // Patch eventId while preserving the rest
                 let current = self.logs[idx]
                 self.logs[idx] = FoodLog(
+                    id: current.id,
                     eventId: eid,
                     date: current.date,
                     food: current.food,
@@ -218,121 +274,214 @@ final class Page2ViewModel: ObservableObject {
                     serverResponse: current.serverResponse,
                     originalQuery: current.originalQuery
                 )
+                FoodLogStore.shared.save(self.logs)
+                print("➕ addLocal – server event_id attached to id=\(current.id) eid=\(eid)")
+            } else {
+                print("⚠️ addLocal – failed to decode add_event response or find log index")
             }
         }
 
         return newLog
     }
 
-    // Delete locally + on DB (rollback on failure)
-    func delete(_ log: FoodLog) {
-        guard let idx = logs.firstIndex(where: { $0.id == log.id }) else { return }
-        let removed = logs.remove(at: idx)
+    // MARK: - Edit existing log
 
-        Task {
-            let uid = UserID.getOrCreate()
-            // If we already have an eventId, delete remotely
-            if let eid = removed.eventId {
-                struct DeletePayload: Encodable { let user_id: String; let event_id: String }
-                do {
-                    _ = try await DBClient.shared.postRaw("delete_event",
-                                                          payload: DeletePayload(user_id: uid, event_id: eid))
-                } catch {
-                    // rollback
-                    logs.insert(removed, at: idx)
-                    sendError = "Delete failed."
+    /// Edit an existing FoodLog.
+    /// - If only the timestamp changes → update date locally + on server (no nutribench call).
+    /// - If meal text changes (with or without timestamp change) → recompute via nutribench and update DB.
+    func applyEdit(for target: FoodLog, newFood: String, newDate: Date) {
+        print("✏️ applyEdit – target.id=\(target.id) target.food='\(target.food)' newFood='\(newFood)' newDate=\(newDate)")
+        let trimmed = newFood.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            print("✏️ applyEdit – trimmed text is empty, abort")
+            return
+        }
+        guard let idx = logs.firstIndex(where: { $0.id == target.id }) else {
+            print("✏️ applyEdit – target not found in logs")
+            return
+        }
+
+        let original = logs[idx]
+        let dateChanged = abs(original.date.timeIntervalSince(newDate)) > 1.0
+        let foodChanged = trimmed != original.originalQuery
+        print("✏️ applyEdit – dateChanged=\(dateChanged) foodChanged=\(foodChanged)")
+
+        func makeDetails(food: String, carbsText: String, steps: String?, originalQuery: String, date: Date) -> [String: AnyEncodable] {
+            let iso = isoFormatter.string(from: date)
+            let totalCarbs = Int(carbsText.replacingOccurrences(of: "g", with: "")) ?? 0
+            return [
+                "food": AnyEncodable(food),
+                "carbsText": AnyEncodable(carbsText),
+                "total_carbs_g": AnyEncodable(totalCarbs),
+                "serverResponse": AnyEncodable(steps ?? ""),
+                "calculation_steps": AnyEncodable(steps ?? ""),
+                "originalQuery": AnyEncodable(originalQuery),
+                "timestampISO": AnyEncodable(iso)
+            ]
+        }
+
+        // Case 1: only time changed
+        if !foodChanged && dateChanged {
+            print("✏️ applyEdit – only date changed, updating locally and server")
+            let updated = FoodLog(
+                id: original.id,
+                eventId: original.eventId,
+                date: newDate,
+                food: original.food,
+                carbsText: original.carbsText,
+                serverResponse: original.serverResponse,
+                originalQuery: original.originalQuery
+            )
+            logs[idx] = updated
+            logs.sort { $0.date > $1.date }
+            FoodLogStore.shared.save(logs)
+            print("✏️ applyEdit – time-only update done, logs.count=\(logs.count)")
+
+            if let eid = updated.eventId {
+                let uid = UserID.getOrCreate()
+                let details = makeDetails(food: updated.food,
+                                          carbsText: updated.carbsText,
+                                          steps: updated.serverResponse,
+                                          originalQuery: updated.originalQuery,
+                                          date: updated.date)
+                Task {
+                    do {
+                        try await DBClient.shared.updateEvent(userId: uid, eventId: eid, details: details)
+                        print("✏️ applyEdit – time-only update_event succeeded for eid=\(eid)")
+                    } catch {
+                        await MainActor.run {
+                            print("❌ applyEdit – time-only update_event failed: \(error)")
+                            self.sendError = "Edit (time) failed."
+                        }
+                    }
                 }
             }
+            return
         }
-    }
 
-    // Start edit flow
-    func beginEdit(_ log: FoodLog) { editing = log }
-
-    /// Apply edited text:
-    /// 1) Recompute via nutrition Lambda
-    /// 2) Update DB details (keep timestamp)
-    /// 3) Update row locally
-    func applyEdit(foodText: String) {
-        // Capture target & dismiss sheet immediately so it doesn't re-present
-        guard let target = editing else { return }
-        editing = nil
-
+        // Case 2: meal text changed (with or without time change)
+        print("✏️ applyEdit – meal text changed, calling postFood")
         isSending = true
         sendError = nil
 
-        postFood(foodText) { [weak self] result in
+        postFood(trimmed) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.isSending = false
 
-                // Start with conservative defaults; we'll upgrade if parsing works
-                var displayFood = foodText
-                var carbs = "15g"
-                var steps: String? = nil
+                var displayFood = trimmed
+                var carbs = original.carbsText
+                var steps: String? = original.serverResponse
 
                 switch result {
                 case .success(let response):
+                    print("✏️ applyEdit – postFood success")
                     if let parsed = parseNutritionJSON(from: response) {
                         let norm = parsed.foods.map(normalizeFoodName)
                         if !norm.isEmpty { displayFood = norm.joined(separator: ", ") }
                         if let g = parsed.carbsG { carbs = String(format: "%.0fg", g) }
                         steps = parsed.steps
                     } else if let t = self.extractCarbText(from: response) {
-                        let cleaned = t.replacingOccurrences(of: "carbs", with: "", options: .caseInsensitive)
-                                       .replacingOccurrences(of: " ", with: "")
+                        let cleaned = t
+                            .replacingOccurrences(of: "carbs", with: "", options: .caseInsensitive)
+                            .replacingOccurrences(of: " ", with: "")
                         carbs = cleaned.isEmpty ? "15g" : cleaned
                     }
                 case .failure(let e):
-                    // Show error but still let the user’s text change locally
+                    print("❌ applyEdit – postFood failed: \(e)")
                     self.sendError = e.localizedDescription
                 }
 
-                // Update DB if we have an eventId; keep original timestamp
-                let uid = UserID.getOrCreate()
-                if let eid = target.eventId {
-                    let details: [String: AnyEncodable] = [
-                        "food": AnyEncodable(displayFood),
-                        "carbsText": AnyEncodable(carbs),
-                        "total_carbs_g": AnyEncodable(Int(carbs.replacingOccurrences(of: "g", with: "")) ?? 0),
-                        "serverResponse": AnyEncodable(steps ?? ""),
-                        "calculation_steps": AnyEncodable(steps ?? ""),
-                        "originalQuery": AnyEncodable(foodText)
-                    ]
-                    struct UpdatePayload: Encodable {
-                        let user_id: String
-                        let event_id: String
-                        let details: [String: AnyEncodable]
-                    }
-                    Task {
-                        do {
-                            _ = try await DBClient.shared.postRaw(
-                                "update_event",
-                                payload: UpdatePayload(user_id: uid, event_id: eid, details: details)
-                            )
-                        } catch {
-                            await MainActor.run { self.sendError = "Edit failed." }
-                        }
-                    }
+                let updated = FoodLog(
+                    id: original.id,
+                    eventId: original.eventId,
+                    date: dateChanged ? newDate : original.date,
+                    food: displayFood,
+                    carbsText: carbs,
+                    serverResponse: steps,
+                    originalQuery: trimmed
+                )
+
+                if let j = self.logs.firstIndex(where: { $0.id == original.id }) {
+                    self.logs[j] = updated
+                    self.logs.sort { $0.date > $1.date }
+                    FoodLogStore.shared.save(self.logs)
+                    print("✏️ applyEdit – updated local log for id=\(updated.id)")
+                } else {
+                    print("❌ applyEdit – could not find log index during update")
                 }
 
-                // Update local row (same timestamp & eventId)
-                if let idx = self.logs.firstIndex(where: { $0.id == target.id }) {
-                    self.logs[idx] = FoodLog(
-                        eventId: self.logs[idx].eventId,
-                        date: self.logs[idx].date,
-                        food: displayFood,
-                        carbsText: carbs,
-                        serverResponse: steps,
-                        originalQuery: foodText
-                    )
+                if let eid = updated.eventId {
+                    let uid = UserID.getOrCreate()
+                    let details = makeDetails(food: updated.food,
+                                              carbsText: updated.carbsText,
+                                              steps: updated.serverResponse,
+                                              originalQuery: updated.originalQuery,
+                                              date: updated.date)
+                    Task {
+                        do {
+                            try await DBClient.shared.updateEvent(userId: uid, eventId: eid, details: details)
+                            print("✏️ applyEdit – update_event succeeded for eid=\(eid)")
+                        } catch {
+                            await MainActor.run {
+                                print("❌ applyEdit – update_event failed: \(error)")
+                                self.sendError = "Edit failed."
+                            }
+                        }
+                    }
+                } else {
+                    print("✏️ applyEdit – no eventId, skipping server update")
                 }
             }
         }
     }
 
+    // MARK: - Delete
 
-    // --- legacy helper kept for non-JSON responses (last-line / "…= 48 g") ---
+    func delete(_ log: FoodLog) {
+        print("🗑 delete – called for id=\(log.id) food='\(log.food)'")
+        guard let idx = logs.firstIndex(where: { $0.id == log.id }) else {
+            print("🗑 delete – target not found in logs")
+            return
+        }
+
+        // Optimistically remove from local list
+        let removed = logs.remove(at: idx)
+        print("🗑 delete – removed from logs at index \(idx). logs.count now=\(logs.count)")
+        logs.sort { $0.date > $1.date }
+        FoodLogStore.shared.save(logs)
+
+        Task {
+            let uid = UserID.getOrCreate()
+            guard let eid = removed.eventId else {
+                print("🗑 delete – removed log had no eventId, skipping server delete")
+                return
+            }
+
+            struct DeletePayload: Encodable { let user_id: String; let event_id: String }
+
+            do {
+                print("🗑 delete – sending delete_event to server for eid=\(eid)")
+                _ = try await DBClient.shared.postRaw(
+                    "delete_event",
+                    payload: DeletePayload(user_id: uid, event_id: eid)
+                )
+                print("🗑 delete – server delete_event succeeded for eid=\(eid)")
+            } catch {
+                // Roll back on the main actor if server delete fails
+                await MainActor.run {
+                    print("❌ delete – server delete_event failed, rolling back: \(error)")
+                    self.logs.insert(removed, at: idx)
+                    self.logs.sort { $0.date > $1.date }
+                    FoodLogStore.shared.save(self.logs)
+                    self.sendError = "Delete failed."
+                }
+            }
+        }
+    }
+
+    // MARK: - Legacy carb extractor
+
     private func extractCarbText(from text: String?) -> String? {
         guard var t = text?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else { return nil }
 
@@ -359,9 +508,10 @@ final class Page2ViewModel: ObservableObject {
         return cleaned.isEmpty ? nil : cleaned
     }
 
-    // Call your nutrition Lambda (Function URL variant)
-    // Call your nutrition Lambda (Function URL variant)
+    // MARK: - Network call to nutrition Lambda
+
     private func postFood(_ food: String, completion: @escaping (Result<String, Error>) -> Void) {
+        print("🌐 postFood – sending request for food='\(food)'")
         var req = URLRequest(url: endpoint)
         req.httpMethod = "POST"
         req.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
@@ -369,12 +519,17 @@ final class Page2ViewModel: ObservableObject {
         do {
             req.httpBody = try JSONSerialization.data(withJSONObject: payload, options: [])
         } catch {
+            print("❌ postFood – JSON encode error: \(error)")
             completion(.failure(error)); return
         }
 
         URLSession.shared.dataTask(with: req) { data, resp, err in
-            if let err = err { completion(.failure(err)); return }
+            if let err = err {
+                print("❌ postFood – network error: \(err)")
+                completion(.failure(err)); return
+            }
             guard let data else {
+                print("❌ postFood – empty response data")
                 completion(.failure(NSError(domain: "net", code: -1,
                     userInfo: [NSLocalizedDescriptionKey: "Empty response"])))
                 return
@@ -382,6 +537,7 @@ final class Page2ViewModel: ObservableObject {
             do {
                 let obj = try JSONSerialization.jsonObject(with: data, options: []) as? [String: Any]
                 let status = obj?["statusCode"] as? Int ?? 0
+                print("🌐 postFood – statusCode=\(status)")
                 if status != 200 {
                     completion(.failure(NSError(domain: "http", code: status,
                         userInfo: [NSLocalizedDescriptionKey: "Bad status: \(status)"])))
@@ -401,29 +557,29 @@ final class Page2ViewModel: ObservableObject {
                     print("🍱 RAW SERVER BODY (Array→String):\n\(body)")
                     completion(.success(body))
                 } else {
-                    // Nothing recognizable in "body"
                     if let raw = String(data: data, encoding: .utf8), !raw.isEmpty {
                         print("🍱 RAW SERVER BODY (Fallback-TopLevelString):\n\(raw)")
-                        completion(.success(raw))  // <-- still let parser try
+                        completion(.success(raw))
                     } else {
+                        print("❌ postFood – Missing body in response")
                         completion(.failure(NSError(domain: "parse", code: -2,
                             userInfo: [NSLocalizedDescriptionKey: "Missing body"])))
                     }
                 }
             } catch {
-                // JSON parse of the *top-level* failed — try returning raw text anyway
                 if let raw = String(data: data, encoding: .utf8), !raw.isEmpty {
                     print("🍱 RAW SERVER BODY (TopLevel RAW):\n\(raw)")
-                    completion(.success(raw))      // <-- important change
+                    completion(.success(raw))
                 } else {
+                    print("❌ postFood – JSON parse error: \(error)")
                     completion(.failure(error))
                 }
             }
         }.resume()
     }
 
-
     // MARK: - Row date/time formatting
+
     private lazy var dfDate: DateFormatter = {
         let f = DateFormatter(); f.locale = .current; f.timeZone = .current
         f.dateFormat = "EEE, MMM d"; return f
