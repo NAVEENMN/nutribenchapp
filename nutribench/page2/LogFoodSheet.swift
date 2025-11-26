@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct LogFoodSheet: View {
     @Binding var isPresented: Bool
@@ -13,8 +14,12 @@ struct LogFoodSheet: View {
     @State private var sendError: String?
     @State private var responseText: String = ""   // parsed "body" from lambda
 
-    // Return both food and response to the parent so it can save locally
-    let onSave: (_ food: String, _ response: String) -> Void
+    // NEW: image picking state
+    @State private var selectedImage: UIImage? = nil
+    @State private var showImagePicker: Bool = false
+
+    // Return food, response, and optional image
+    let onSave: (_ food: String, _ response: String, _ image: UIImage?) -> Void
 
     private let endpoint = URL(string: "https://5lcj2njvoq4urxszpj7lqoatxy0gslkf.lambda-url.us-west-2.on.aws/")!
 
@@ -31,12 +36,35 @@ struct LogFoodSheet: View {
 
                 Section(header: Text("What did you eat?")) {
                     TextField("e.g., Bagel with cream cheese", text: $foodText)
-                        // iOS 14-friendly capitalization API
                         .autocapitalization(.sentences)
                         .disableAutocorrection(false)
+
+                    HStack {
+                        Button {
+                            showImagePicker = true
+                        } label: {
+                            Image(systemName: "camera")
+                                .font(.system(size: 18, weight: .medium))
+                                .padding(8)
+                                .background(Color(.secondarySystemBackground))
+                                .clipShape(Circle())
+                        }
+                        .buttonStyle(PlainButtonStyle())
+
+                        if let img = selectedImage {
+                            Spacer(minLength: 8)
+                            Image(uiImage: img)
+                                .resizable()
+                                .scaledToFill()
+                                .frame(width: 56, height: 56)
+                                .clipped()
+                                .cornerRadius(8)
+                        }
+
+                        Spacer()
+                    }
                 }
 
-                // iOS 14 style Section with a dynamic footer view
                 Section(
                     footer:
                         Group {
@@ -52,15 +80,14 @@ struct LogFoodSheet: View {
                         }
                 ) {
                     Button {
+                        let trimmed = foodText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !trimmed.isEmpty else { return }
+
                         if skipServerCall {
-                            // Edit mode: just return the text; ViewModel will handle inference + update_event.
-                            let trimmed = foodText.trimmingCharacters(in: .whitespacesAndNewlines)
-                            guard !trimmed.isEmpty else { return }
-                            onSave(trimmed, "")
+                            onSave(trimmed, "", selectedImage)
                             isPresented = false
                         } else {
-                            // Add mode: infer via Lambda, then auto-save.
-                            sendToLambda(food: foodText)
+                            sendToLambda(food: trimmed)
                         }
                     } label: {
                         HStack {
@@ -78,14 +105,18 @@ struct LogFoodSheet: View {
             )
             .onAppear {
                 now = Date()
-                if foodText.isEmpty { foodText = initialText }   // prefill once
+                if foodText.isEmpty { foodText = initialText }
+            }
+        }
+        .sheet(isPresented: $showImagePicker) {
+            ImagePicker(sourceType: .photoLibrary) { img in
+                self.selectedImage = img
             }
         }
     }
 
     // MARK: - Networking (Add mode)
 
-    /// POST {"body":"<food>"} (UTF-8 JSON) → parse {"statusCode":200,"body":<string or object>}
     private func sendToLambda(food: String) {
         let trimmed = food.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -123,7 +154,7 @@ struct LogFoodSheet: View {
                 func finishAndDismissIfReady() {
                     let foodClean = trimmed
                     if !foodClean.isEmpty, !self.responseText.isEmpty {
-                        self.onSave(foodClean, self.responseText)
+                        self.onSave(foodClean, self.responseText, self.selectedImage)
                         self.isPresented = false
                     }
                 }
@@ -137,14 +168,12 @@ struct LogFoodSheet: View {
                             return
                         }
                         if let bodyStr = dict["body"] as? String {
-                            print("🍱 RAW SERVER BODY (String):\n\(bodyStr)")
                             self.responseText = bodyStr
                             finishAndDismissIfReady()
                             return
                         } else if let bodyObj = dict["body"] as? [String: Any] {
                             let data2 = try JSONSerialization.data(withJSONObject: bodyObj)
                             let bodyStr = String(data: data2, encoding: .utf8) ?? ""
-                            print("🍱 RAW SERVER BODY (Dict→String):\n\(bodyStr)")
                             self.responseText = bodyStr
                             finishAndDismissIfReady()
                             return

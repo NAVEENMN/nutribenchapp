@@ -11,6 +11,7 @@ enum Tab: Hashable {
     case upload      // Page 1
     case logFood     // Page 2
     case trends      // Page 3
+    case photos
 }
 
 struct ContentView: View {
@@ -36,6 +37,14 @@ struct ContentView: View {
                     Text("Log Food")
                 }
                 .tag(Tab.logFood)
+            
+            // --- Food Photos page ---
+            FoodPhotosView()
+                .tabItem {
+                    Image(systemName: "square.grid.3x3.fill")
+                    Text("Food Photos")
+                }
+                .tag(Tab.photos)
             
             // --- Glucose trends page ---
             Page3View()

@@ -109,7 +109,6 @@ struct ServerEvent: Decodable {
     let event_id: String?
     let event_type: String
 
-    // Prefer the explicit ISO field if present
     let timestampISO: String?
     let timestamp: String?
 
@@ -121,16 +120,22 @@ struct ServerEvent: Decodable {
         let carbsText: String = {
             if let s = details?["carbsText"]?.value as? String { return s }
             if let g = details?["carbs_g"]?.value as? Double { return String(format: "%.0f g", g) }
-            if let gStr = details?["total_carbs_g"]?.value as? String, let g = Double(gStr) { return String(format: "%.0f g", g) }
+            if let gStr = details?["total_carbs_g"]?.value as? String, let g = Double(gStr) {
+                return String(format: "%.0f g", g)
+            }
             return "15 g"
         }()
         let steps = (details?["calculation_steps"]?.value as? String)
                  ?? (details?["serverResponse"]?.value as? String)
         let original = (details?["originalQuery"]?.value as? String) ?? food
 
-        // NEW: use details["timestampISO"] (edited meal time) if present
+        // Prefer the timestampISO inside details (user-edited time), then fall back
         let detailTS = details?["timestampISO"]?.value as? String
-        let date = DateParsers.parseServerTimestamp(detailTS ?? timestampISO ?? timestamp) ?? Date.distantPast
+        let date = DateParsers.parseServerTimestamp(detailTS ?? timestampISO ?? timestamp)
+                 ?? Date.distantPast
+
+        // NEW: optional image URL from server
+        let imageS3URL = details?["image_s3_url"]?.value as? String
 
         return FoodLog(
             eventId: event_id,
@@ -138,10 +143,11 @@ struct ServerEvent: Decodable {
             food: food,
             carbsText: carbsText,
             serverResponse: steps,
-            originalQuery: original
+            originalQuery: original,
+            imageS3URL: imageS3URL,
+            localImageFilename: nil      // will fill when we cache locally
         )
     }
-
 }
 
 
