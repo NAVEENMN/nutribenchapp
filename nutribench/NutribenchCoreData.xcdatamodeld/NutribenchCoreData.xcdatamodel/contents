@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<model type="com.apple.IDECoreDataModeler.DataModel" documentVersion="1.0" lastSavedToolsVersion="24411" systemVersion="25B78" minimumToolsVersion="Automatic" sourceLanguage="Swift" usedWithSwiftData="YES" userDefinedModelVersionIdentifier="">
+    <entity name="FoodLogRecord" representedClassName=".FoodLogRecord" syncable="YES">
+        <attribute name="carbsText" optional="YES" attributeType="String"/>
+        <attribute name="date" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="eventId" optional="YES" attributeType="String"/>
+        <attribute name="food" optional="YES" attributeType="String"/>
+        <attribute name="id" optional="YES" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="imageS3URL" optional="YES" attributeType="String"/>
+        <attribute name="localImageFilename" optional="YES" attributeType="String"/>
+        <attribute name="originalQuery" optional="YES" attributeType="String"/>
+        <attribute name="serverResponse" optional="YES" attributeType="String"/>
+    </entity>
+</model>
